@@ -963,9 +963,37 @@ REDUCE_FOLDER(ReduceAllOp)
 REDUCE_FOLDER(ReduceAnyOp)
 REDUCE_FOLDER(ReduceMaxOp)
 REDUCE_FOLDER(ReduceMinOp)
-REDUCE_FOLDER(ReduceProdOp)
 REDUCE_FOLDER(ReduceSumOp)
 #undef REDUCE_FOLDER
+
+OpFoldResult ReduceProdOp::fold(FoldAdaptor adaptor) {
+  ShapedType inputTy = llvm::cast<ShapedType>(getInput().getType());
+  if (!inputTy.hasRank())
+    return {};
+  if (inputTy == getType() &&
+      (inputTy.getRank() == 0 || inputTy.getDimSize(getAxis()) == 1))
+    return getInput();
+
+  // Fold multiply like reduce_prod operators using mulBinaryFolder
+  if (inputTy.getRank() == 1 && inputTy.getDimSize(0) == 2) {
+    const auto resultTy = llvm::dyn_cast<RankedTensorType>(getType());
+    if (!resultTy)
+      return {};
+
+    const auto elements =
+        llvm::dyn_cast_if_present<DenseElementsAttr>(adaptor.getInput());
+    if (!elements)
+      return {};
+
+    const auto lhsAttr =
+        DenseElementsAttr::get(resultTy, {elements.getValues<Attribute>()[0]});
+    const auto rhsAttr =
+        DenseElementsAttr::get(resultTy, {elements.getValues<Attribute>()[1]});
+    return mulBinaryFolder(lhsAttr, rhsAttr, resultTy, 0);
+  }
+
+  return {};
+}
 
 OpFoldResult ReshapeOp::fold(FoldAdaptor adaptor) {
   auto inputTy = llvm::dyn_cast<RankedTensorType>(getInput1().getType());
