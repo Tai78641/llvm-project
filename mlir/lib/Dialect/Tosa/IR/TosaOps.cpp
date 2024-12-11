@@ -1374,41 +1374,22 @@ llvm::LogicalResult tosa::ReshapeOp::verify() {
   return mlir::success();
 }
 
-LogicalResult tosa::TransposeOp::getConstantPerms(SmallVector<int32_t> &perms) {
-  // Perms must be constants.
-  DenseIntElementsAttr permsAttr;
-  if (!matchPattern(getPerms(), m_Constant(&permsAttr)))
-    return failure();
-
-  perms.clear();
-  for (auto v : permsAttr.getValues<APInt>())
-    perms.push_back(v.getSExtValue());
-
-  return success();
-}
-
 LogicalResult tosa::TransposeOp::inferReturnTypeComponents(
     MLIRContext *context, ::std::optional<Location> location,
     TransposeOp::Adaptor adaptor,
     SmallVectorImpl<ShapedTypeComponents> &inferredReturnShapes) {
   ShapeAdaptor inputShape(adaptor.getInput1().getType());
-  ShapeAdaptor permsShape(adaptor.getPerms().getType());
-
-  // We cannot infer anything from a rank-0 "permutation" tensor.
-  if (permsShape.hasRank() && permsShape.getRank() == 0)
-    return failure();
 
   // If input rank and permutation length is unknown, the output rank is
   // unknown.
-  if (!inputShape.hasRank() || !permsShape.hasRank() ||
-      permsShape.isDynamicDim(0)) {
+  if (!inputShape.hasRank()) {
     inferredReturnShapes.push_back(ShapedTypeComponents());
     return success();
   }
 
   // This would imply the number of permutations does not match the rank of
   // the input which is illegal.
-  if (permsShape.getDimSize(0) != inputShape.getRank()) {
+  if (adaptor.getPerms().size() != static_cast<size_t>(inputShape.getRank())) {
     return failure();
   }
 
@@ -1437,28 +1418,16 @@ LogicalResult tosa::TransposeOp::inferReturnTypeComponents(
   }
 
   outputShape.resize(inputShape.getRank(), ShapedType::kDynamic);
-  // If the permuations are a constant we can directly determine the output
-  // shape.
-  DenseIntElementsAttr attr;
-  if (matchPattern(adaptor.getPerms(), m_Constant(&attr)) &&
-      attr.getType().getRank() == 1) {
-    ShapeAdaptor permShape = attr;
-    // Constant permutation must be the same length as the input rank.
-    if (inputShape.getRank() != permShape.getRank())
-      return emitOptionalError(location,
-                               "constant permutation must be the same length"
-                               " as the input rank");
 
-    // Constant permutation values must be within the input rank.
-    for (int i = 0, e = inputShape.getRank(); i < e; i++) {
-      if (inputShape.getRank() <= permShape.getDimSize(i))
-        return failure();
-    }
+  // Constant permutation values must be within the input rank.
+  for (auto i : adaptor.getPerms()) {
+    if (inputShape.getRank() <= i)
+      return failure();
+  }
 
-    outputShape.reserve(inputShape.getRank());
-    for (int i = 0, s = inputShape.getRank(); i < s; i++) {
-      outputShape[i] = inputShape.getDimSize(permShape.getDimSize(i));
-    }
+  outputShape.reserve(inputShape.getRank());
+  for (int i = 0, s = inputShape.getRank(); i < s; i++) {
+    outputShape[i] = inputShape.getDimSize(adaptor.getPerms()[i]);
   }
 
   inferredReturnShapes.push_back(ShapedTypeComponents(outputShape));
@@ -1467,75 +1436,61 @@ LogicalResult tosa::TransposeOp::inferReturnTypeComponents(
 
 LogicalResult tosa::TransposeOp::verify() {
   TensorType inputType = getInput1().getType();
-  TensorType permType = getPerms().getType();
   TensorType outputType = getOutput().getType();
+  const llvm::ArrayRef<int32_t> constantPerms = getPerms();
 
-  if (permType.hasRank() && permType.getRank() != 1)
-    return emitOpError()
-           << "expected permutation tensor to be rank 1 but got rank "
-           << permType.getRank();
-  if (inputType.hasRank() && permType.hasRank())
-    if (!permType.isDynamicDim(0) &&
-        permType.getDimSize(0) != inputType.getRank())
-      return emitOpError() << "expected permutation tensor dim 0 to have size "
+  if (inputType.hasRank())
+    if (constantPerms.size() != static_cast<size_t>(inputType.getRank()))
+      return emitOpError() << "expected perms attribute to have size "
                            << inputType.getRank()
                            << " (input rank) but got size "
-                           << permType.getDimSize(0);
+                           << constantPerms.size();
   if (inputType.hasRank() && outputType.hasRank() &&
       inputType.getRank() != outputType.getRank())
     return emitOpError()
            << "expected input tensor rank to equal result tensor rank";
-  if (outputType.hasRank() && permType.hasRank())
-    if (!permType.isDynamicDim(0) &&
-        permType.getDimSize(0) != outputType.getRank())
-      return emitOpError() << "expected permutation tensor dim 0 to have size "
+  if (outputType.hasRank())
+    if (constantPerms.size() != static_cast<size_t>(outputType.getRank()))
+      return emitOpError() << "expected perms attribute to have size "
                            << outputType.getRank()
                            << " (output rank) but got size "
-                           << permType.getDimSize(0);
+                           << constantPerms.size();
 
-  SmallVector<int32_t> constantPerms;
-  if (succeeded(getConstantPerms(constantPerms))) {
-    // Assert that the permutation tensor has a rank, which means that the
-    // rank has been verified above.
-    assert(permType.hasRank() &&
-           "Unexpectedly found permutation tensor without rank");
-    if (!llvm::all_of(constantPerms,
-                      [&constantPerms](int32_t s) {
-                        return s >= 0 &&
-                               static_cast<size_t>(s) < constantPerms.size();
-                      }) ||
-        !isPermutationVector(llvm::to_vector(llvm::map_range(
-            constantPerms, [](int32_t v) -> int64_t { return v; }))))
-      return emitOpError() << "expected valid permutation tensor";
+  if (!llvm::all_of(constantPerms,
+                    [&constantPerms](int32_t s) {
+                      return s >= 0 &&
+                             static_cast<size_t>(s) < constantPerms.size();
+                    }) ||
+      !isPermutationVector(llvm::to_vector(llvm::map_range(
+          constantPerms, [](int32_t v) -> int64_t { return v; }))))
+    return emitOpError() << "expected valid permutation indices";
 
-    // Verify that the types of the input and output tensors are properly
-    // permuted.
-    if (inputType.hasRank() && outputType.hasRank()) {
-      assert(constantPerms.size() == static_cast<size_t>(inputType.getRank()) &&
-             inputType.getRank() == outputType.getRank());
+  // Verify that the types of the input and output tensors are properly
+  // permuted.
+  if (inputType.hasRank() && outputType.hasRank()) {
+    assert(constantPerms.size() == static_cast<size_t>(inputType.getRank()) &&
+           inputType.getRank() == outputType.getRank());
 
-      for (auto i = 0; i < outputType.getRank(); i++) {
-        if (inputType.isDynamicDim(constantPerms[i]) ||
-            outputType.isDynamicDim(i))
-          continue;
+    for (auto i = 0; i < outputType.getRank(); i++) {
+      if (inputType.isDynamicDim(constantPerms[i]) ||
+          outputType.isDynamicDim(i))
+        continue;
 
-        if (inputType.getDimSize(constantPerms[i]) != outputType.getDimSize(i))
-          return emitOpError()
-                 << "expected output tensor dim " << i << " to match "
-                 << "input dim " << constantPerms[i] << " with value of "
-                 << inputType.getDimSize(constantPerms[i]);
-      }
+      if (inputType.getDimSize(constantPerms[i]) != outputType.getDimSize(i))
+        return emitOpError()
+               << "expected output tensor dim " << i << " to match "
+               << "input dim " << constantPerms[i] << " with value of "
+               << inputType.getDimSize(constantPerms[i]);
     }
   }
+
   return success();
 }
 
 LogicalResult TransposeOp::reifyResultShapes(
     OpBuilder &builder, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
 
-  SmallVector<int32_t> transposePerms;
-  if (getConstantPerms(transposePerms).failed())
-    return failure();
+  const llvm::ArrayRef<int32_t> transposePerms = getPerms();
 
   Value input = getInput1();
   auto inputType = cast<TensorType>(input.getType());

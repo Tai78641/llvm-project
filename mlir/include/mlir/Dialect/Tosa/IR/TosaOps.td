@@ -2011,7 +2011,7 @@ def Tosa_TransposeOp : Tosa_InferShapedTypeOp<"transpose",
 
   let arguments = (ins
     Tosa_Tensor:$input1,
-    Tosa_Int32Tensor:$perms
+    DenseI32ArrayAttr:$perms
   );
 
   let results = (
@@ -2022,10 +2022,6 @@ def Tosa_TransposeOp : Tosa_InferShapedTypeOp<"transpose",
     Profile<[Tosa_PRO_INT, Tosa_PRO_FP]>,
     Extension<[Tosa_EXT_FP8E4M3, Tosa_EXT_FP8E5M2, Tosa_EXT_BF16]>,
   ];
-
-  let extraClassDeclaration = [{
-    LogicalResult getConstantPerms(llvm::SmallVector<int32_t> &perms);
-  }];
 
   let hasCanonicalizer = 1;
   let hasFolder = 1;
