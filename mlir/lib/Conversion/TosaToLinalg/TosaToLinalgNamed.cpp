@@ -621,15 +621,38 @@ public:
                            .create<linalg::FillOp>(loc, ValueRange{zero},
                                                    ValueRange{emptyTensor})
                            .result();
-    if (!op.getAZp() && !op.getBZp()) {
+
+    FailureOr<int64_t> maybeAZp = op.getAZeroPoint();
+    FailureOr<int64_t> maybeBZp = op.getBZeroPoint();
+    if (failed(maybeAZp))
+      return rewriter.notifyMatchFailure(
+          op, "input a zero point cannot be statically determined");
+    if (failed(maybeBZp))
+      return rewriter.notifyMatchFailure(
+          op, "input b zero point cannot be statically determined");
+
+    int64_t aZpVal = *maybeAZp;
+    int64_t bZpVal = *maybeBZp;
+
+    if (op.verifyAZeroPoint(aZpVal).failed())
+      return rewriter.notifyMatchFailure(
+          op, "input a zero point must be zero for non-int8 integer types");
+
+    if (op.verifyBZeroPoint(bZpVal).failed())
+      return rewriter.notifyMatchFailure(
+          op, "input b zero point must be zero for non-int8 integer types");
+
+    if (aZpVal == 0 && bZpVal == 0) {
       rewriter.replaceOpWithNewOp<linalg::BatchMatmulOp>(
           op, TypeRange{op.getType()},
           ValueRange{adaptor.getA(), adaptor.getB()}, ValueRange{zeroTensor});
       return success();
     }
 
-    auto aZp = rewriter.create<arith::ConstantOp>(loc, op.getAZpAttr());
-    auto bZp = rewriter.create<arith::ConstantOp>(loc, op.getBZpAttr());
+    auto aZp = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI32IntegerAttr(aZpVal));
+    auto bZp = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI32IntegerAttr(bZpVal));
     rewriter.replaceOpWithNewOp<linalg::QuantizedBatchMatmulOp>(
         op, TypeRange{op.getType()},
         ValueRange{adaptor.getA(), adaptor.getB(), aZp, bZp}, zeroTensor);
