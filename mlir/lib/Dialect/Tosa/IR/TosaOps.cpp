@@ -1178,6 +1178,25 @@ LogicalResult tosa::ConcatOp::verify() {
                  << " on operands 0 and " << operandNum;
       }
     }
+
+    // ERROR_IF(axis_sum != shape[axis]);
+    int64_t axis_sum = 0;
+    for (const auto &input : inputList) {
+      const ShapeAdaptor inputShape(input.getType());
+      if (inputShape.isDynamicDim(axis)) {
+        // make axis_sum negative to indicate invalid value
+        axis_sum = -1;
+        break;
+      }
+      axis_sum += inputShape.getDimSize(axis);
+    }
+    const ShapeAdaptor outputShape(outType);
+    if (axis_sum >= 0 && outputShape.hasRank() &&
+        !outputShape.isDynamicDim(axis) &&
+        axis_sum != outputShape.getDimSize(axis))
+      return emitOpError("requires sum of axis dimensions of input1 "
+                         "equal to output axis dimension, got ")
+             << axis_sum << " and " << outputShape.getDimSize(axis);
   }
 
   return success();
